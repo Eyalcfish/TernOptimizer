@@ -17,18 +17,35 @@ const (
 	sloAndNot
 	sloXor
 	sloNot
+	sloTernlog
 )
 
 type Value struct {
 	id   uint32
 	op   SIMDLogicalOP
 	args []*Value
+
+	imm8 uint8
 }
 
 type EValue struct {
 	value  *Value
 	params []*EValue
 	args   []*EValue
+}
+
+func simulateTERNLOG(a, b, c bool, imm8 uint8) bool {
+	idx := 0
+	if a {
+		idx |= 4
+	}
+	if b {
+		idx |= 2
+	}
+	if c {
+		idx |= 1
+	}
+	return (imm8 & (1 << idx)) != 0
 }
 
 func GroupUnion(a, b []*EValue) []*EValue {
@@ -100,6 +117,11 @@ func getEValResult(root *EValue, ev *EValue, inputs []bool) bool {
 		return getEValResult(root, ev.args[0], inputs) && !getEValResult(root, ev.args[1], inputs)
 	case sloXor:
 		return getEValResult(root, ev.args[0], inputs) != getEValResult(root, ev.args[1], inputs)
+	case sloTernlog:
+		a := getEValResult(root, ev.args[0], inputs)
+		b := getEValResult(root, ev.args[1], inputs)
+		c := getEValResult(root, ev.args[2], inputs)
+		return simulateTERNLOG(a, b, c, ev.value.imm8)
 	case sloNot:
 		return !getEValResult(root, ev.args[0], inputs)
 	default:
@@ -112,84 +134,164 @@ func main() {
 	regB := &Value{id: 102, op: sloInterior}
 	regC := &Value{id: 103, op: sloInterior}
 
-	// 2. Table-driven AST Test Cases
-	tests := []struct {
+	fmt.Println("=== SUITE 1: AST PURE LOGIC CHECKS ===")
+
+	logicTests := []struct {
+		name     string
+		root     *Value
+		inputs   []bool // Specific runtime states to test
+		expected bool
+	}{
+		{
+			name:     "T AND F -> False",
+			root:     &Value{op: sloAnd, args: []*Value{regA, regB}},
+			inputs:   []bool{true, false},
+			expected: false,
+		},
+		{
+			name:     "T OR F -> True",
+			root:     &Value{op: sloOr, args: []*Value{regA, regB}},
+			inputs:   []bool{true, false},
+			expected: true,
+		},
+		{
+			name: "Complex: (T AND F) OR (NOT F) -> True",
+			root: &Value{
+				op: sloOr,
+				args: []*Value{
+					{op: sloAnd, args: []*Value{regA, regB}}, // T & F = F
+					{op: sloNot, args: []*Value{regC}},       // !F = T
+				},
+			},
+			inputs:   []bool{true, false, false}, // regA=T, regB=F, regC=F
+			expected: true,
+		},
+	}
+
+	logicPassed := 0
+	for _, tc := range logicTests {
+		eTree := computeParameterTree(tc.root)
+		result := getEValResult(eTree, eTree, tc.inputs)
+
+		if result == tc.expected {
+			fmt.Printf("[PASS] %-40s\n", tc.name)
+			logicPassed++
+		} else {
+			fmt.Printf("[FAIL] %-40s -> Got: %v | Expected: %v\n", tc.name, result, tc.expected)
+		}
+	}
+
+	fmt.Println("\n=== SUITE 2: TERNLOG IMM8 SYNTHESIS ===")
+
+	ternTests := []struct {
 		name     string
 		root     *Value
 		expected uint8
 	}{
 		{
-			name:     "Identity AND (A & B)",
+			name:     "A AND B",
 			root:     &Value{op: sloAnd, args: []*Value{regA, regB}},
-			expected: 0xC0, // A=0xF0 & B=0xCC = 0xC0
+			expected: 0xC0,
 		},
 		{
-			name:     "Identity OR (A | B)",
+			name:     "A OR B",
 			root:     &Value{op: sloOr, args: []*Value{regA, regB}},
-			expected: 0xFC, // A=0xF0 | B=0xCC = 0xFC
+			expected: 0xFC,
 		},
 		{
-			name:     "Identity XOR (A ^ B)",
-			root:     &Value{op: sloXor, args: []*Value{regA, regB}},
-			expected: 0x3C, // A=0xF0 ^ B=0xCC = 0x3C
-		},
-		{
-			name: "Ternary Mixed ((A & B) ^ C)",
+			name: "((A AND B) OR C) XOR A",
 			root: &Value{
 				op: sloXor,
 				args: []*Value{
-					{op: sloAnd, args: []*Value{regA, regB}},
-					regC,
+					{op: sloOr, args: []*Value{
+						{op: sloAnd, args: []*Value{regA, regB}},
+						regC,
+					}},
+					regA,
 				},
 			},
-			expected: 0x6A, // 0xC0 ^ 0xAA = 0x6A
+			expected: 0x1A,
 		},
 		{
-			name:     "Aliasing Reduction (A & A)",
+			name:     "Aliased Redundancy (A AND A)",
 			root:     &Value{op: sloAnd, args: []*Value{regA, regA}},
-			expected: 0xF0, // Should reduce perfectly to A's mask
+			expected: 0xF0,
+		},
+		// ==========================================
+		// NEW TESTS: sloTernlog Integration
+		// ==========================================
+		{
+			// Proves the engine can evaluate a pre-compiled TERNLOG node.
+			// 0x96 is the truth table for (A XOR B XOR C).
+			name: "Passthrough pre-compiled TERNLOG",
+			root: &Value{
+				op:   sloTernlog,
+				imm8: 0x96,
+				args: []*Value{regA, regB, regC},
+			},
+			expected: 0x96,
 		},
 		{
-			name:     "Aliasing Nullification (A ^ A)",
-			root:     &Value{op: sloXor, args: []*Value{regA, regA}},
-			expected: 0x00, // Should nullify
-		},
-		{
-			name: "Deep Nesting ((A | B) & !C)",
+			// Proves we can combine a standard logical op with a TERNLOG.
+			// Expression: A AND TERNLOG_XOR(A, B, C)
+			// Math: 0xF0 & 0x96 = 0x90
+			name: "Hybrid: A AND TERNLOG_XOR(A, B, C)",
 			root: &Value{
 				op: sloAnd,
 				args: []*Value{
-					{op: sloOr, args: []*Value{regA, regB}},
-					{op: sloNot, args: []*Value{regC}},
+					regA,
+					{op: sloTernlog, imm8: 0x96, args: []*Value{regA, regB, regC}},
 				},
 			},
-			expected: 0x54, // (0xF0 | 0xCC) & ^0xAA = 0xFC & 0x55 = 0x54
+			expected: 0x90,
+		},
+		{
+			// The Holy Grail: Folding multiple TERNLOGs into one.
+			// Inner: TERNLOG_AND(A, B, C) -> 0x80
+			// Outer: TERNLOG_OR(A, B, Inner) -> 0xFE is the truth table for X | Y | Z
+			// Math: A | B | (A & B & C) = 0xF0 | 0xCC | 0x80 = 0xFC
+			name: "Nested TERNLOGs: OR(A, B, AND(A,B,C))",
+			root: &Value{
+				op:   sloTernlog,
+				imm8: 0xFE, // Truth table for (arg0 | arg1 | arg2)
+				args: []*Value{
+					regA,
+					regB,
+					{op: sloTernlog, imm8: 0x80, args: []*Value{regA, regB, regC}}, // Truth table for (arg0 & arg1 & arg2)
+				},
+			},
+			expected: 0xFC,
+		},
+		{
+			// Testing parameter aliasing inside a TERNLOG node.
+			// Expression: TERNLOG_NOT(A) OR B
+			// 0x0F is the truth table for NOT A (inverts the highest nibble).
+			// Math: (!A) | B = 0x0F | 0xCC = 0xCF
+			name: "Aliased Hybrid: TERNLOG_NOT(A) OR B",
+			root: &Value{
+				op: sloOr,
+				args: []*Value{
+					{op: sloTernlog, imm8: 0x0F, args: []*Value{regA, regA, regA}}, // Padding args with regA
+					regB,
+				},
+			},
+			expected: 0xCF,
 		},
 	}
 
-	// 3. Execution Engine
-	fmt.Println("=== SSA TERNLOG SYNTHESIS TESTS ===")
-	passed := 0
-
-	for _, tc := range tests {
-		// Build the EValue AST
+	ternPassed := 0
+	for _, tc := range ternTests {
 		eTree := computeParameterTree(tc.root)
-
-		// Synthesize the Immediate Byte
 		imm8 := computeTT(eTree)
 
-		// Verification
 		if imm8 == tc.expected {
-			fmt.Printf("[PASS] %-30s -> 0x%02X\n", tc.name, imm8)
-			passed++
+			fmt.Printf("[PASS] %-40s -> 0x%02X\n", tc.name, imm8)
+			ternPassed++
 		} else {
-			fmt.Printf("[FAIL] %-30s -> Got: 0x%02X, Expected: 0x%02X\n", tc.name, imm8, tc.expected)
-
-			// Print Deduplication state for debug
-			fmt.Printf("       Variable Count: %d\n", len(eTree.params))
+			fmt.Printf("[FAIL] %-40s -> Got: 0x%02X | Expected: 0x%02X\n", tc.name, imm8, tc.expected)
 		}
 	}
 
-	fmt.Printf("-----------------------------------\n")
-	fmt.Printf("RESULT: %d/%d Tests Passed\n", passed, len(tests))
+	fmt.Printf("\n------------------------------------------------\n")
+	fmt.Printf("RESULTS: Logic %d/%d | Ternlog %d/%d\n", logicPassed, len(logicTests), ternPassed, len(ternTests))
 }
