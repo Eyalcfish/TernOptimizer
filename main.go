@@ -2,7 +2,7 @@ package main
 
 import (
 	"fmt"
-	"strings"
+	"sort"
 )
 
 type SIMDLogicalOP uint8
@@ -23,7 +23,7 @@ const (
 )
 
 type Value struct {
-	id   uint32
+	id   int
 	op   SIMDLogicalOP
 	args []*Value
 
@@ -150,6 +150,8 @@ func fullRewrite(v *Value) *Value {
 
 	v = rewriteTern(rv)
 
+	mergeTernlog(v)
+
 	return v
 }
 
@@ -184,22 +186,20 @@ func rewriteTern(rv *RValue) *Value {
 	totalVars := GroupUnion(rv.relations[0], rv.relations[1])
 	count := len(totalVars)
 
-	var emptyValue *Value = nil // &Value{id: 0, op: sloNone}
-
 	if count < 4 {
 		v := &Value{
-			id:   rv.evalue.value.id, // Steal the ID here too!
+			id:   rv.evalue.value.id,
 			op:   sloTernlog,
 			args: make([]*Value, 3),
 		}
 
 		if count == 1 {
 			rv.evalue.params = []*EValue{totalVars[0], totalVars[0], totalVars[0]}
-			v.args[0], v.args[1], v.args[2] = totalVars[0].value, emptyValue, emptyValue
+			v.args[0], v.args[1], v.args[2] = totalVars[0].value, totalVars[0].value, totalVars[0].value
 
 		} else if count == 2 {
 			rv.evalue.params = []*EValue{totalVars[0], totalVars[1], totalVars[0]}
-			v.args[0], v.args[1], v.args[2] = totalVars[0].value, totalVars[1].value, emptyValue
+			v.args[0], v.args[1], v.args[2] = totalVars[0].value, totalVars[1].value, totalVars[0].value
 
 		} else if count == 3 {
 			rv.evalue.params = []*EValue{totalVars[0], totalVars[1], totalVars[2]}
@@ -232,10 +232,10 @@ func rewriteTern(rv *RValue) *Value {
 
 		if newCount == 1 {
 			recalculatedEV.params = []*EValue{recalculatedEV.params[0], recalculatedEV.params[0], recalculatedEV.params[0]}
-			v.args[0], v.args[1], v.args[2] = recalculatedEV.params[0].value, emptyValue, emptyValue
+			v.args[0], v.args[1], v.args[2] = recalculatedEV.params[0].value, rv.evalue.value.args[0], rv.evalue.value.args[0]
 		} else if newCount == 2 {
 			recalculatedEV.params = []*EValue{recalculatedEV.params[0], recalculatedEV.params[1], recalculatedEV.params[0]}
-			v.args[0], v.args[1], v.args[2] = recalculatedEV.params[0].value, recalculatedEV.params[1].value, emptyValue
+			v.args[0], v.args[1], v.args[2] = recalculatedEV.params[0].value, recalculatedEV.params[1].value, rv.evalue.value.args[0]
 		} else if newCount == 3 {
 			v.args[0], v.args[1], v.args[2] = recalculatedEV.params[0].value, recalculatedEV.params[1].value, recalculatedEV.params[2].value
 		}
@@ -249,80 +249,231 @@ func rewriteTern(rv *RValue) *Value {
 	return rv.evalue.value
 }
 
-func printAST(v *Value, indent string) string {
-	if v == nil {
-		return "nil"
-	}
-
-	opNames := map[SIMDLogicalOP]string{
-		sloAnd: "AND", sloOr: "OR", sloXor: "XOR", sloAndNot: "ANDNOT",
-		sloNot: "NOT", sloTernlog: "TERNLOG", sloInterior: "LEAF",
-	}
-
-	name := opNames[v.op]
-	if v.op&sloInterior != 0 && v.op != sloInterior {
-		name = opNames[v.op&^sloInterior] + "_LEAF"
-	} else if v.op == sloInterior {
-		return fmt.Sprintf("Reg[%d]", v.id)
-	}
-
+func mergeTernlog(v *Value) *Value {
 	if v.op == sloTernlog {
-		res := fmt.Sprintf("TERNLOG(imm8: 0x%02X)\n", v.imm8)
-		for _, arg := range v.args {
-			res += indent + "  ├── " + printAST(arg, indent+"  ") + "\n"
+		//rule 1
+		if v.args[2] == v.args[0] && v.args[1] != v.args[0] {
+			if v.args[0].op == sloTernlog && v.args[1].op == sloTernlog {
+				if v.args[0].args[2] == v.args[0].args[0] && v.args[0].args[1] != v.args[0].args[0] && v.args[1].args[2] == v.args[1].args[0] && v.args[1].args[1] != v.args[1].args[0] {
+					newarg1 := &Value{
+						id:   v.args[0].id,
+						op:   sloTernlog,
+						args: []*Value{v.args[0].args[0], v.args[0].args[1], v.args[1].args[0]},                                                                                  // a,b,c
+						imm8: computeTT(computeParameterTree(&Value{op: sloTernlog, id: v.args[0].id, args: []*Value{v.args[0].args[0], v.args[0].args[1], v.args[1].args[0]}})), // a,b,c
+					}
+					newv := &Value{
+						id:   v.id,
+						op:   sloTernlog,
+						args: []*Value{newarg1, v.args[1].args[0], v.args[1].args[1]},                                                                          // ternlog(a,b,c),c,d
+						imm8: computeTT(computeParameterTree(&Value{op: sloTernlog, id: v.id, args: []*Value{newarg1, v.args[1].args[0], v.args[1].args[1]}})), // ternlog(ternlog(a,b,c),c,d)
+					}
+					*v = *newv
+				}
+			}
 		}
-		return strings.TrimRight(res, "\n")
+		for _, arg := range v.args {
+			mergeTernlog(arg)
+		}
 	}
-
-	res := fmt.Sprintf("%s\n", name)
-	for _, arg := range v.args {
-		res += indent + "  ├── " + printAST(arg, indent+"  ") + "\n"
-	}
-	return strings.TrimRight(res, "\n")
+	return v
 }
 
 func main() {
-	// 4 Hardware Registers
+	// --- REGISTERS ---
 	regA := &Value{id: 101, op: sloInterior}
 	regB := &Value{id: 102, op: sloInterior}
 	regC := &Value{id: 103, op: sloInterior}
 	regD := &Value{id: 104, op: sloInterior}
+	regE := &Value{id: 105, op: sloInterior}
+	regF := &Value{id: 106, op: sloInterior}
 
-	// The Clever Person Trap: ((A AND B) XOR B) XOR (D XOR (C AND D))
-	cascadeTree := &Value{
-		id: 200, op: sloXor,
-		args: []*Value{
-			// Left Branch: ((A AND B) XOR B)
-			{
-				id: 201, op: sloXor,
+	// --- DEFINING THE TEST SUITE ---
+	tests := []struct {
+		name string
+		tree *Value
+	}{
+		{
+			name: "The Clever Person Trap (4 Vars)",
+			tree: &Value{
+				id: 200, op: sloXor,
 				args: []*Value{
-					{
-						id: 202, op: sloAnd,
-						args: []*Value{regA, regB},
-					},
-					regB,
+					{id: 201, op: sloXor, args: []*Value{{id: 202, op: sloAnd, args: []*Value{regA, regB}}, regB}},
+					{id: 203, op: sloXor, args: []*Value{regD, {id: 204, op: sloAnd, args: []*Value{regC, regD}}}},
 				},
 			},
-			// Right Branch: (D XOR (C AND D))
-			{
-				id: 203, op: sloXor,
+		},
+		{
+			name: "The 6-Var Split",
+			tree: &Value{
+				id: 300, op: sloXor,
 				args: []*Value{
-					regD,
-					{
-						id: 204, op: sloAnd,
-						args: []*Value{regC, regD},
-					},
+					{id: 301, op: sloXor, args: []*Value{{id: 302, op: sloAnd, args: []*Value{regA, regB}}, regC}},
+					{id: 303, op: sloAnd, args: []*Value{{id: 304, op: sloOr, args: []*Value{regD, regE}}, regF}},
+				},
+			},
+		},
+		{
+			name: "The Redundancy Wall (Deep tree, 2 Vars)",
+			tree: &Value{
+				id: 500, op: sloXor,
+				args: []*Value{
+					{id: 501, op: sloAnd, args: []*Value{
+						{id: 502, op: sloXor, args: []*Value{regA, regB}},
+						{id: 503, op: sloOr, args: []*Value{regA, regB}},
+					}},
+					{id: 504, op: sloAnd, args: []*Value{regA, regB}},
 				},
 			},
 		},
 	}
 
-	fmt.Println("=== BEFORE REWRITE ===")
-	fmt.Print(printAST(cascadeTree, ""))
+	// --- RUNNING THE TEST SUITE ---
+	for _, tt := range tests {
+		fmt.Printf("==========================================\n")
+		fmt.Printf("TEST: %s\n", tt.name)
+		fmt.Printf("==========================================\n")
 
-	// Run your engine!
-	optimizedTree := fullRewrite(cascadeTree)
+		// 1. Identify all unique variables in this tree
+		varMap := make(map[int]bool)
+		extractRegIDs(tt.tree, varMap)
+		vars := make([]int, 0, len(varMap))
+		for id := range varMap {
+			vars = append(vars, id)
+		}
+		sort.Ints(vars) // Sort for deterministic truth tables
 
-	fmt.Println("\n=== AFTER REWRITE ===")
-	fmt.Print(printAST(optimizedTree, ""))
+		// 2. Capture the exact boolean logic BEFORE optimization
+		originalLogic := captureTruthTable(tt.tree, vars)
+
+		fmt.Println("=== BEFORE REWRITE ===")
+		fmt.Print(printAST(tt.tree, "", make(map[*Value]bool)))
+
+		// 3. Unleash the engine
+		optimizedTree := fullRewrite(tt.tree)
+
+		fmt.Println("\n=== AFTER REWRITE ===")
+		fmt.Print(printAST(optimizedTree, "", make(map[*Value]bool)))
+
+		// 4. Capture the boolean logic AFTER optimization
+		optimizedLogic := captureTruthTable(optimizedTree, vars)
+
+		// 5. Verify Logic Preservation
+		match := true
+		for i := range originalLogic {
+			if originalLogic[i] != optimizedLogic[i] {
+				match = false
+				break
+			}
+		}
+
+		if match {
+			fmt.Printf("\n[✓] LOGIC VERIFIED: All %d combinations match perfectly.\n", len(originalLogic))
+		} else {
+			fmt.Printf("\n[X] LOGIC CORRUPTED: The rewrite changed the mathematical output!\n")
+		}
+		fmt.Println()
+	}
+}
+
+// ==========================================
+// --- LOGIC EVALUATION ENGINE ---
+// ==========================================
+
+// extractRegIDs crawls the AST to find every unique physical register
+func extractRegIDs(v *Value, ids map[int]bool) {
+	if v == nil {
+		return
+	}
+	if v.op&sloInterior != 0 {
+		ids[v.id] = true
+	}
+	for _, arg := range v.args {
+		extractRegIDs(arg, ids)
+	}
+}
+
+// captureTruthTable evaluates the AST for every possible combination of inputs
+func captureTruthTable(v *Value, vars []int) []bool {
+	numVars := len(vars)
+	numCombinations := 1 << numVars // 2^N combinations
+	result := make([]bool, numCombinations)
+
+	for i := 0; i < numCombinations; i++ {
+		// Build the environment (1s and 0s) for this specific combination
+		env := make(map[int]bool)
+		for j := 0; j < numVars; j++ {
+			env[vars[j]] = ((i >> j) & 1) == 1
+		}
+		result[i] = evalTree(v, env)
+	}
+	return result
+}
+
+// evalTree natively executes the boolean math of your AST, including simulating Intel's VPTERNLOGD
+func evalTree(v *Value, env map[int]bool) bool {
+	switch v.op {
+	case sloInterior:
+		return env[v.id]
+	case sloAnd:
+		return evalTree(v.args[0], env) && evalTree(v.args[1], env)
+	case sloOr:
+		return evalTree(v.args[0], env) || evalTree(v.args[1], env)
+	case sloXor:
+		return evalTree(v.args[0], env) != evalTree(v.args[1], env)
+	case sloTernlog:
+		// Simulate the physical hardware pins
+		a := evalTree(v.args[0], env)
+		b := evalTree(v.args[1], env)
+		c := evalTree(v.args[2], env)
+
+		// Calculate the Intel immediate byte index: (A<<2) | (B<<1) | C
+		idx := 0
+		if a {
+			idx |= 4
+		}
+		if b {
+			idx |= 2
+		}
+		if c {
+			idx |= 1
+		}
+
+		// Return true if that specific bit in the imm8 hex code is a 1
+		return (v.imm8 & (1 << idx)) != 0
+	}
+	return false
+}
+
+// ==========================================
+// --- DAG PRINTER ---
+// ==========================================
+func printAST(v *Value, indent string, visited map[*Value]bool) string {
+	if v == nil {
+		return indent + "nil\n"
+	}
+	if visited[v] {
+		return indent + fmt.Sprintf("-> [Shared Wire to Node %d]\n", v.id)
+	}
+	visited[v] = true
+
+	res := indent
+	switch v.op {
+	case sloInterior:
+		res += fmt.Sprintf("Reg[%d]\n", v.id)
+	case sloTernlog:
+		res += fmt.Sprintf("TERNLOG(imm8: 0x%02X) [ID: %d]\n", v.imm8, v.id)
+	case sloAnd:
+		res += "AND\n"
+	case sloOr:
+		res += "OR\n"
+	case sloXor:
+		res += "XOR\n"
+	default:
+		res += fmt.Sprintf("OP(%d)\n", v.op)
+	}
+
+	for _, arg := range v.args {
+		res += printAST(arg, indent+"  ", visited)
+	}
+	return res
 }
