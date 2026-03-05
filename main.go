@@ -142,6 +142,10 @@ func rewriteTern(ev *EValue) *EValue {
 		return ev
 	}
 
+	for _, arg := range ev.args {
+		rewriteTern(arg)
+	}
+
 	if len(ev.params) < 4 && len(ev.params) > 1 {
 		imm8 := computeTT(ev)
 		ev.value.op = sloTernlog
@@ -154,14 +158,9 @@ func rewriteTern(ev *EValue) *EValue {
 			params[2] = ev.params[2].value
 		}
 		ev.args = ev.params
-
 		ev.value.args = params
-		return ev
-	} else {
-		for _, arg := range ev.args {
-			rewriteTern(arg)
-		}
 	}
+
 	return ev
 }
 
@@ -209,7 +208,7 @@ func main() {
 		op: sloXor,
 		args: []*Value{
 			{op: sloAnd, args: []*Value{aregA, aregB}},
-			aregB,
+			aregB,*
 		},
 	}
 
