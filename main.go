@@ -34,8 +34,13 @@ type EValue struct {
 	value  *Value
 	params []*EValue
 	args   []*EValue
+}
 
-	totalArgs int
+type RValue struct {
+	evalue *EValue
+
+	relations [2][]*EValue
+	args      []*RValue
 }
 
 func simulateTERNLOG(a, b, c bool, imm8 uint8) bool {
@@ -75,7 +80,7 @@ func computeParameterTree(v *Value) *EValue {
 		value: v,
 	}
 
-	if v.op&sloInterior != 0 {
+	if v.op&sloInterior != 0 || v.op == sloTernlog {
 		ev.params = []*EValue{ev}
 		return ev
 	}
@@ -104,14 +109,11 @@ func computeTT(v *EValue) uint8 {
 }
 
 func getEValResult(root *EValue, ev *EValue, inputs []bool) bool {
-	if ev.value.op&sloInterior != 0 {
-		for idx, param := range root.params {
-			if param.value.id == ev.value.id {
-				return inputs[idx]
-			}
+	for idx, param := range root.params {
+		if param.value.id == ev.value.id {
+			return inputs[idx]
 		}
 	}
-
 	Op := ev.value.op &^ sloInterior
 
 	switch Op {
@@ -137,31 +139,114 @@ func getEValResult(root *EValue, ev *EValue, inputs []bool) bool {
 	}
 }
 
-func rewriteTern(ev *EValue) *EValue {
+func fullRewrite(v *Value) *Value {
+	if v.op&sloInterior != 0 {
+		return v
+	}
+
+	ev := computeParameterTree(v)
+
+	rv := findRelations(ev)
+
+	v = rewriteTern(rv)
+
+	return v
+}
+
+func findRelations(ev *EValue) *RValue {
+	rv := &RValue{evalue: ev}
+
 	if ev.value.op&sloInterior != 0 {
-		return ev
+		rv.relations = [2][]*EValue{{rv.evalue.params[0]}, {}} // A leaf node is related to itself in the first group
+		return rv
 	}
 
-	for _, arg := range ev.args {
-		rewriteTern(arg)
+	arg1 := ev.args[0]
+	childRV1 := findRelations(arg1)
+	rv.relations[0] = GroupUnion(childRV1.relations[0], childRV1.relations[1]) // combine the relations of the child
+	rv.args = append(rv.args, childRV1)
+
+	if len(ev.args) > 1 {
+		arg2 := ev.args[1]
+		childRV2 := findRelations(arg2)
+		rv.relations[1] = GroupUnion(childRV2.relations[0], childRV2.relations[1]) // combine the relations of the child
+		rv.args = append(rv.args, childRV2)
 	}
 
-	if len(ev.params) < 4 && len(ev.params) > 1 {
-		imm8 := computeTT(ev)
-		ev.value.op = sloTernlog
-		ev.value.imm8 = imm8
-		params := make([]*Value, 3)
-		params[0] = ev.params[0].value
-		params[1] = ev.params[1].value
-		params[2] = &Value{op: sloPos, id: ev.args[0].value.id}
-		if len(ev.params) > 2 {
-			params[2] = ev.params[2].value
+	return rv
+}
+
+func rewriteTern(rv *RValue) *Value {
+	if rv.evalue.value.op&sloInterior != 0 {
+		return rv.evalue.value
+	}
+
+	totalVars := GroupUnion(rv.relations[0], rv.relations[1])
+	count := len(totalVars)
+
+	var emptyValue *Value = nil // &Value{id: 0, op: sloNone}
+
+	if count < 4 {
+		v := &Value{
+			id:   rv.evalue.value.id, // Steal the ID here too!
+			op:   sloTernlog,
+			args: make([]*Value, 3),
 		}
-		ev.args = ev.params
-		ev.value.args = params
+
+		if count == 1 {
+			rv.evalue.params = []*EValue{totalVars[0], totalVars[0], totalVars[0]}
+			v.args[0], v.args[1], v.args[2] = totalVars[0].value, emptyValue, emptyValue
+
+		} else if count == 2 {
+			rv.evalue.params = []*EValue{totalVars[0], totalVars[1], totalVars[0]}
+			v.args[0], v.args[1], v.args[2] = totalVars[0].value, totalVars[1].value, emptyValue
+
+		} else if count == 3 {
+			rv.evalue.params = []*EValue{totalVars[0], totalVars[1], totalVars[2]}
+			v.args[0], v.args[1], v.args[2] = totalVars[0].value, totalVars[1].value, totalVars[2].value
+		}
+
+		v.imm8 = computeTT(rv.evalue)
+
+		*rv.evalue.value = *v
+
+		return v
 	}
 
-	return ev
+	if len(rv.args) > 0 {
+		rv.evalue.value.args[0] = rewriteTern(rv.args[0])
+	}
+	if len(rv.args) > 1 {
+		rv.evalue.value.args[1] = rewriteTern(rv.args[1])
+	}
+
+	recalculatedEV := computeParameterTree(rv.evalue.value)
+	newCount := len(recalculatedEV.params)
+
+	if newCount < 4 {
+		v := &Value{
+			id:   rv.evalue.value.id, // Steal the ID here too!
+			op:   sloTernlog,
+			args: make([]*Value, 3),
+		}
+
+		if newCount == 1 {
+			recalculatedEV.params = []*EValue{recalculatedEV.params[0], recalculatedEV.params[0], recalculatedEV.params[0]}
+			v.args[0], v.args[1], v.args[2] = recalculatedEV.params[0].value, emptyValue, emptyValue
+		} else if newCount == 2 {
+			recalculatedEV.params = []*EValue{recalculatedEV.params[0], recalculatedEV.params[1], recalculatedEV.params[0]}
+			v.args[0], v.args[1], v.args[2] = recalculatedEV.params[0].value, recalculatedEV.params[1].value, emptyValue
+		} else if newCount == 3 {
+			v.args[0], v.args[1], v.args[2] = recalculatedEV.params[0].value, recalculatedEV.params[1].value, recalculatedEV.params[2].value
+		}
+
+		v.imm8 = computeTT(recalculatedEV)
+		*rv.evalue.value = *v
+
+		return v
+	}
+
+	return rv.evalue.value
 }
 
 func printAST(v *Value, indent string) string {
@@ -198,271 +283,46 @@ func printAST(v *Value, indent string) string {
 
 func main() {
 	// 4 Hardware Registers
-	aregA := &Value{id: 101, op: sloInterior}
-	aregB := &Value{id: 102, op: sloInterior}
-	aregC := &Value{id: 103, op: sloInterior}
-	aregD := &Value{id: 104, op: sloInterior}
-
-	// The "Clever Person" Equation: ((A AND B) XOR B) XOR (D XOR (C AND D))
-	leftBranch := &Value{
-		op: sloXor,
-		args: []*Value{
-			{op: sloAnd, args: []*Value{aregA, aregB}},
-			aregB,*
-		},
-	}
-
-	rightBranch := &Value{
-		op: sloXor,
-		args: []*Value{
-			aregD,
-			{op: sloAnd, args: []*Value{aregC, aregD}},
-		},
-	}
-
-	cleverTree := &Value{
-		op:   sloXor,
-		args: []*Value{leftBranch, rightBranch},
-	}
-
-	fmt.Println("=== BEFORE REWRITE: The 'Clever Person' Equation ===")
-	fmt.Println(printAST(cleverTree, ""))
-
-	// Build the context tree and run your optimizer
-	eTree := computeParameterTree(cleverTree)
-	rewriteTern(eTree)
-
-	fmt.Println("\n=== AFTER REWRITE: Current Maximal Munch Output ===")
-	fmt.Println(printAST(cleverTree, ""))
-	// 5 Hardware Registers for complex testing
 	regA := &Value{id: 101, op: sloInterior}
 	regB := &Value{id: 102, op: sloInterior}
 	regC := &Value{id: 103, op: sloInterior}
 	regD := &Value{id: 104, op: sloInterior}
-	regE := &Value{id: 105, op: sloInterior}
 
-	fmt.Println()
-
-	fmt.Println("=== SUITE 1: AST PURE LOGIC CHECKS ===")
-
-	logicTests := []struct {
-		name     string
-		root     *Value
-		inputs   []bool // Specific runtime states to test
-		expected bool
-	}{
-		{
-			name:     "T AND F -> False",
-			root:     &Value{op: sloAnd, args: []*Value{regA, regB}},
-			inputs:   []bool{true, false},
-			expected: false,
-		},
-		{
-			name:     "T OR F -> True",
-			root:     &Value{op: sloOr, args: []*Value{regA, regB}},
-			inputs:   []bool{true, false},
-			expected: true,
-		},
-		{
-			name: "Complex: (T AND F) OR (NOT F) -> True",
-			root: &Value{
-				op: sloOr,
-				args: []*Value{
-					{op: sloAnd, args: []*Value{regA, regB}}, // T & F = F
-					{op: sloNot, args: []*Value{regC}},       // !F = T
-				},
-			},
-			inputs:   []bool{true, false, false}, // regA=T, regB=F, regC=F
-			expected: true,
-		},
-		{
-			name: "4-Variable Overload: (T & T) | (F & T) -> True",
-			root: &Value{
-				op: sloOr,
-				args: []*Value{
-					{op: sloAnd, args: []*Value{regA, regB}},
-					{op: sloAnd, args: []*Value{regC, regD}},
-				},
-			},
-			// T & T | F & T == T | F == True
-			inputs:   []bool{true, true, false, true},
-			expected: true,
-		},
-		{
-			name: "5-Variable Monster: ((T & T) | (F ^ T)) & F -> False",
-			root: &Value{
-				op: sloAnd,
+	// The Clever Person Trap: ((A AND B) XOR B) XOR (D XOR (C AND D))
+	cascadeTree := &Value{
+		id: 200, op: sloXor,
+		args: []*Value{
+			// Left Branch: ((A AND B) XOR B)
+			{
+				id: 201, op: sloXor,
 				args: []*Value{
 					{
-						op: sloOr,
-						args: []*Value{
-							{op: sloAnd, args: []*Value{regA, regB}},
-							{op: sloXor, args: []*Value{regC, regD}},
-						},
+						id: 202, op: sloAnd,
+						args: []*Value{regA, regB},
 					},
-					regE,
-				},
-			},
-			// ((T & T) | (F ^ T)) & F == (T | T) & F == T & F == False
-			inputs:   []bool{true, true, false, true, false},
-			expected: false,
-		},
-	}
-
-	logicPassed := 0
-	for _, tc := range logicTests {
-		eTree := computeParameterTree(tc.root)
-
-		// This is brilliant: you are mutating the AST and THEN checking its logic.
-		// If simulateTERNLOG is wrong, these will fail!
-		eTree = rewriteTern(eTree)
-
-		result := getEValResult(eTree, eTree, tc.inputs)
-
-		if result == tc.expected {
-			fmt.Printf("[PASS] %-60s\n", tc.name)
-			logicPassed++
-		} else {
-			fmt.Printf("[FAIL] %-60s -> Got: %v | Expected: %v\n", tc.name, result, tc.expected)
-		}
-	}
-
-	fmt.Println("\n=== SUITE 2: TERNLOG IMM8 SYNTHESIS ===")
-
-	ternTests := []struct {
-		name     string
-		root     *Value
-		expected uint8
-	}{
-		{
-			name:     "A AND B",
-			root:     &Value{op: sloAnd, args: []*Value{regA, regB}},
-			expected: 0xC0,
-		},
-		{
-			name:     "A OR B",
-			root:     &Value{op: sloOr, args: []*Value{regA, regB}},
-			expected: 0xFC,
-		},
-		{
-			name: "((A AND B) OR C) XOR A",
-			root: &Value{
-				op: sloXor,
-				args: []*Value{
-					{op: sloOr, args: []*Value{
-						{op: sloAnd, args: []*Value{regA, regB}},
-						regC,
-					}},
-					regA,
-				},
-			},
-			expected: 0x1A,
-		},
-		{
-			name:     "Aliased Redundancy (A AND A)",
-			root:     &Value{op: sloAnd, args: []*Value{regA, regA}},
-			expected: 0xF0,
-		},
-		{
-			name: "Passthrough pre-compiled TERNLOG",
-			root: &Value{
-				op:   sloTernlog,
-				imm8: 0x96,
-				args: []*Value{regA, regB, regC},
-			},
-			expected: 0x96,
-		},
-		{
-			name: "Nested TERNLOGs: OR(A, B, AND(A,B,C))",
-			root: &Value{
-				op:   sloTernlog,
-				imm8: 0xFE,
-				args: []*Value{
-					regA,
 					regB,
-					{op: sloTernlog, imm8: 0x80, args: []*Value{regA, regB, regC}},
 				},
 			},
-			expected: 0xFC,
-		},
-	}
-
-	ternPassed := 0
-	for _, tc := range ternTests {
-		eTree := computeParameterTree(tc.root)
-		imm8 := computeTT(eTree)
-
-		if imm8 == tc.expected {
-			fmt.Printf("[PASS] %-40s -> 0x%02X\n", tc.name, imm8)
-			ternPassed++
-		} else {
-			fmt.Printf("[FAIL] %-40s -> Got: 0x%02X | Expected: 0x%02X\n", tc.name, imm8, tc.expected)
-		}
-	}
-
-	// ========================================================================
-	// NEW: SUITE 3
-	// ========================================================================
-	fmt.Println("\n=== SUITE 3: GRAPH MUTATION & MAXIMAL MUNCH ===")
-
-	mutationTests := []struct {
-		name   string
-		root   *Value
-		verify func(ev *EValue) bool // Programmatically check the AST shape
-	}{
-		{
-			name: "Collapse 3-Variable Tree",
-			root: &Value{
-				op: sloOr,
+			// Right Branch: (D XOR (C AND D))
+			{
+				id: 203, op: sloXor,
 				args: []*Value{
-					{op: sloAnd, args: []*Value{regA, regB}},
-					regC,
+					regD,
+					{
+						id: 204, op: sloAnd,
+						args: []*Value{regC, regD},
+					},
 				},
-			},
-			verify: func(ev *EValue) bool {
-				// The entire thing should collapse into a single TERNLOG
-				return ev.value.op == sloTernlog && ev.value.imm8 == 0xEA
-			},
-		},
-		{
-			name: "Recursive Split 4-Variable Tree",
-			root: &Value{
-				op: sloOr,
-				args: []*Value{
-					{op: sloAnd, args: []*Value{regA, regB}}, // Branch L
-					{op: sloAnd, args: []*Value{regC, regD}}, // Branch R
-				},
-			},
-			verify: func(ev *EValue) bool {
-				// Root must stay OR (4 variables is too many)
-				if ev.value.op != sloOr {
-					return false
-				}
-
-				// Left and Right children should be squashed into TERNLOGs
-				leftChild := ev.args[0].value
-				rightChild := ev.args[1].value
-
-				return leftChild.op == sloTernlog && leftChild.imm8 == 0xC0 &&
-					rightChild.op == sloTernlog && rightChild.imm8 == 0xC0
 			},
 		},
 	}
 
-	mutPassed := 0
-	for _, tc := range mutationTests {
-		eTree := computeParameterTree(tc.root)
-		eTree = rewriteTern(eTree) // Run the optimizer
+	fmt.Println("=== BEFORE REWRITE ===")
+	fmt.Print(printAST(cascadeTree, ""))
 
-		if tc.verify(eTree) {
-			fmt.Printf("[PASS] %-40s\n", tc.name)
-			mutPassed++
-		} else {
-			fmt.Printf("[FAIL] %-40s -> Tree structural mismatch\n", tc.name)
-		}
-	}
+	// Run your engine!
+	optimizedTree := fullRewrite(cascadeTree)
 
-	fmt.Printf("\n------------------------------------------------\n")
-	fmt.Printf("RESULTS: Logic %d/%d | Ternlog %d/%d | Mutation %d/%d\n",
-		logicPassed, len(logicTests), ternPassed, len(ternTests), mutPassed, len(mutationTests))
+	fmt.Println("\n=== AFTER REWRITE ===")
+	fmt.Print(printAST(optimizedTree, ""))
 }
