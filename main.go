@@ -153,6 +153,13 @@ func fullRewrite(v *Value) *Value {
 
 	v = mergeTernlog(v)
 
+	v = lowerRewrite(v)
+
+	return v
+}
+
+func lowerRewrite(v *Value) *Value {
+	// TODO: lower ternlogs to normal instructions if the ternlog is useless
 	return v
 }
 
@@ -256,46 +263,40 @@ func mergeTernlog(v *Value) *Value {
 			v.args[i] = mergeTernlog(arg)
 		}
 		//rule 1
-		if v.args[2] == v.args[0] && v.args[1] != v.args[0] {
-			if v.args[0].op == sloTernlog && v.args[1].op == sloTernlog {
-				if v.args[0].args[2] == v.args[0].args[0] && v.args[0].args[1] != v.args[0].args[0] && v.args[1].args[2] == v.args[1].args[0] && v.args[1].args[1] != v.args[1].args[0] {
-					// newarg1 := &Value{
-					// 	id:   v.args[0].id,
-					// 	op:   sloTernlog,
-					// 	args: []*Value{v.args[0].args[0], v.args[0].args[1], v.args[0].args[0]},                                                                                  // a,b,c
-					// 	imm8: computeTT(computeParameterTree(&Value{op: sloTernlog, id: v.args[0].id, args: []*Value{v.args[0].args[0], v.args[0].args[1], v.args[0].args[0]}})), // a,b,c // REGULAR IMM8 CALCULATION DONT WORK
-					// }
-					arg1 := v.args[0]
-					arg2 := v.args[1].args[0]
-					arg3 := v.args[1].args[1]
+		if v.args[0].op == sloTernlog && v.args[1].op == sloTernlog {
+			if v.args[0].args[2] == v.args[0].args[0] && v.args[0].args[1] != v.args[0].args[0] && v.args[1].args[2] == v.args[1].args[0] && v.args[1].args[1] != v.args[1].args[0] {
+				arg1 := v.args[0]
+				arg2 := v.args[1].args[0]
+				arg3 := v.args[1].args[1]
 
-					var composedImm8 uint8 = 0
-					for i := 0; i < 8; i++ {
-						t1_state := (i & 4) != 0
-						c_state := (i & 2) != 0
-						d_state := (i & 1) != 0
+				var composedImm8 uint8 = 0
+				for i := 0; i < 8; i++ {
+					t1_state := (i & 4) != 0
+					c_state := (i & 2) != 0
+					d_state := (i & 1) != 0
 
-						t2_out := simulateTERNLOG(c_state, d_state, c_state, v.args[1].imm8)
+					t2_out := simulateTERNLOG(c_state, d_state, c_state, v.args[1].imm8)
 
-						parent_out := simulateTERNLOG(t1_state, t2_out, t1_state, v.imm8)
+					parent_out := simulateTERNLOG(t1_state, t2_out, t1_state, v.imm8)
 
-						if parent_out {
-							composedImm8 |= (1 << i)
-						}
+					if parent_out {
+						composedImm8 |= (1 << i)
 					}
+				}
 
-					*v = Value{
-						id:   v.id,
-						op:   sloTernlog,
-						args: []*Value{arg1, arg2, arg3},
-						imm8: composedImm8,
-					}
+				*v = Value{
+					id:   v.id,
+					op:   sloTernlog,
+					args: []*Value{arg1, arg2, arg3},
+					imm8: composedImm8,
 				}
 			}
 		}
 	}
 	return v
 }
+
+// TESTING AND BENCHMARKING MOSTLY AI GENERATED BELOW, NOT CORE TO THE REWRITE ALGORITHM
 
 func countNodes(v *Value) int {
 	return countUniqueNodes(v, make(map[*Value]bool))
