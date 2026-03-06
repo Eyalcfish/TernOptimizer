@@ -81,7 +81,7 @@ func computeParameterTree(v *Value) *EValue {
 		value: v,
 	}
 
-	if v.op&sloInterior != 0 || v.op == sloTernlog {
+	if v.op&sloInterior != 0 || (v.op == sloTernlog) {
 		ev.params = []*EValue{ev}
 		return ev
 	}
@@ -151,7 +151,7 @@ func fullRewrite(v *Value) *Value {
 
 	v = rewriteTern(rv)
 
-	mergeTernlog(v)
+	v = mergeTernlog(v)
 
 	return v
 }
@@ -252,31 +252,68 @@ func rewriteTern(rv *RValue) *Value {
 
 func mergeTernlog(v *Value) *Value {
 	if v.op == sloTernlog {
-		for _, arg := range v.args {
-			mergeTernlog(arg)
+		for i, arg := range v.args {
+			v.args[i] = mergeTernlog(arg)
 		}
 		//rule 1
 		if v.args[2] == v.args[0] && v.args[1] != v.args[0] {
 			if v.args[0].op == sloTernlog && v.args[1].op == sloTernlog {
 				if v.args[0].args[2] == v.args[0].args[0] && v.args[0].args[1] != v.args[0].args[0] && v.args[1].args[2] == v.args[1].args[0] && v.args[1].args[1] != v.args[1].args[0] {
-					newarg1 := &Value{
-						id:   v.args[0].id,
-						op:   sloTernlog,
-						args: []*Value{v.args[0].args[0], v.args[0].args[1], v.args[1].args[0]},                                                                                  // a,b,c
-						imm8: computeTT(computeParameterTree(&Value{op: sloTernlog, id: v.args[0].id, args: []*Value{v.args[0].args[0], v.args[0].args[1], v.args[1].args[0]}})), // a,b,c
+					// newarg1 := &Value{
+					// 	id:   v.args[0].id,
+					// 	op:   sloTernlog,
+					// 	args: []*Value{v.args[0].args[0], v.args[0].args[1], v.args[0].args[0]},                                                                                  // a,b,c
+					// 	imm8: computeTT(computeParameterTree(&Value{op: sloTernlog, id: v.args[0].id, args: []*Value{v.args[0].args[0], v.args[0].args[1], v.args[0].args[0]}})), // a,b,c // REGULAR IMM8 CALCULATION DONT WORK
+					// }
+					arg1 := v.args[0]
+					arg2 := v.args[1].args[0]
+					arg3 := v.args[1].args[1]
+
+					var composedImm8 uint8 = 0
+					for i := 0; i < 8; i++ {
+						t1_state := (i & 4) != 0
+						c_state := (i & 2) != 0
+						d_state := (i & 1) != 0
+
+						t2_out := simulateTERNLOG(c_state, d_state, c_state, v.args[1].imm8)
+
+						parent_out := simulateTERNLOG(t1_state, t2_out, t1_state, v.imm8)
+
+						if parent_out {
+							composedImm8 |= (1 << i)
+						}
 					}
-					newv := &Value{
+
+					*v = Value{
 						id:   v.id,
 						op:   sloTernlog,
-						args: []*Value{newarg1, v.args[1].args[0], v.args[1].args[1]},                                                                          // ternlog(a,b,c),c,d
-						imm8: computeTT(computeParameterTree(&Value{op: sloTernlog, id: v.id, args: []*Value{newarg1, v.args[1].args[0], v.args[1].args[1]}})), // ternlog(ternlog(a,b,c),c,d)
+						args: []*Value{arg1, arg2, arg3},
+						imm8: composedImm8,
 					}
-					*v = *newv
 				}
 			}
 		}
 	}
 	return v
+}
+
+func countNodes(v *Value) int {
+	return countUniqueNodes(v, make(map[*Value]bool))
+}
+
+func countUniqueNodes(v *Value, visited map[*Value]bool) int {
+	if v == nil || visited[v] {
+		return 0
+	}
+
+	visited[v] = true
+
+	count := 1
+	for _, arg := range v.args {
+		count += countUniqueNodes(arg, visited)
+	}
+
+	return count
 }
 
 func main() {
@@ -292,17 +329,17 @@ func main() {
 	fmt.Println("🔨 GENERATING MONSTER TREE (Depth 14)...")
 	startGen := time.Now()
 	idCounter := 1000 // Start IDs high to avoid colliding with registers
-	monsterTree := buildMassiveTree(3, leafPool, &idCounter)
-	fmt.Print(printAST(monsterTree, "", make(map[*Value]bool)))
-	fmt.Printf("Done. Generated %d nodes in %v\n", idCounter-1000, time.Since(startGen))
+	monsterTree := buildMassiveTree(10, leafPool, &idCounter)
+	// fmt.Print(printAST(monsterTree, "", make(map[*Value]bool)))
+	fmt.Printf("Done. Generated %d nodes in %v, Total Nodes: %d\n", idCounter-1000, time.Since(startGen), countNodes(monsterTree))
 
 	// 3. Run the Synthesis Engine (The Rewrite)
 	fmt.Println("\n🚀 COMPILING (Technology Mapping)...")
 	startCompile := time.Now()
 	optimizedTree := fullRewrite(monsterTree)
 	compileTime := time.Since(startCompile)
-	fmt.Printf("Done. Compilation took: %v\n", compileTime)
-	fmt.Print(printAST(optimizedTree, "", make(map[*Value]bool)))
+	fmt.Printf("Done. Compilation took: %v, Total Nodes: %d\n", compileTime, countNodes(optimizedTree))
+	// fmt.Print(printAST(optimizedTree, "", make(map[*Value]bool)))
 
 	// 4. Formal Verification Prep
 	varMap := make(map[int]bool)
@@ -455,7 +492,7 @@ func printAST(v *Value, indent string, visited map[*Value]bool) string {
 	res := indent
 	switch v.op {
 	case sloInterior:
-		res += fmt.Sprintf("Reg[%d]\n", v.id)
+		res += fmt.Sprintf("Reg[%d] len: %d\n", v.id, len(v.args))
 	case sloTernlog:
 		res += fmt.Sprintf("TERNLOG(imm8: 0x%02X) [ID: %d]\n", v.imm8, v.id)
 	case sloAnd:
