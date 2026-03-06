@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"sort"
+	"time"
 )
 
 type SIMDLogicalOP uint8
@@ -251,6 +252,9 @@ func rewriteTern(rv *RValue) *Value {
 
 func mergeTernlog(v *Value) *Value {
 	if v.op == sloTernlog {
+		for _, arg := range v.args {
+			mergeTernlog(arg)
+		}
 		//rule 1
 		if v.args[2] == v.args[0] && v.args[1] != v.args[0] {
 			if v.args[0].op == sloTernlog && v.args[1].op == sloTernlog {
@@ -271,107 +275,99 @@ func mergeTernlog(v *Value) *Value {
 				}
 			}
 		}
-		for _, arg := range v.args {
-			mergeTernlog(arg)
-		}
 	}
 	return v
 }
 
 func main() {
-	// --- REGISTERS ---
-	regA := &Value{id: 101, op: sloInterior}
-	regB := &Value{id: 102, op: sloInterior}
-	regC := &Value{id: 103, op: sloInterior}
-	regD := &Value{id: 104, op: sloInterior}
-	regE := &Value{id: 105, op: sloInterior}
-	regF := &Value{id: 106, op: sloInterior}
-
-	// --- DEFINING THE TEST SUITE ---
-	tests := []struct {
-		name string
-		tree *Value
-	}{
-		{
-			name: "The Clever Person Trap (4 Vars)",
-			tree: &Value{
-				id: 200, op: sloXor,
-				args: []*Value{
-					{id: 201, op: sloXor, args: []*Value{{id: 202, op: sloAnd, args: []*Value{regA, regB}}, regB}},
-					{id: 203, op: sloXor, args: []*Value{regD, {id: 204, op: sloAnd, args: []*Value{regC, regD}}}},
-				},
-			},
-		},
-		{
-			name: "The 6-Var Split",
-			tree: &Value{
-				id: 300, op: sloXor,
-				args: []*Value{
-					{id: 301, op: sloXor, args: []*Value{{id: 302, op: sloAnd, args: []*Value{regA, regB}}, regC}},
-					{id: 303, op: sloAnd, args: []*Value{{id: 304, op: sloOr, args: []*Value{regD, regE}}, regF}},
-				},
-			},
-		},
-		{
-			name: "The Redundancy Wall (Deep tree, 2 Vars)",
-			tree: &Value{
-				id: 500, op: sloXor,
-				args: []*Value{
-					{id: 501, op: sloAnd, args: []*Value{
-						{id: 502, op: sloXor, args: []*Value{regA, regB}},
-						{id: 503, op: sloOr, args: []*Value{regA, regB}},
-					}},
-					{id: 504, op: sloAnd, args: []*Value{regA, regB}},
-				},
-			},
-		},
+	// 1. Create a pool of 16 physical hardware registers
+	var leafPool []*Value
+	for i := 100; i < 116; i++ {
+		leafPool = append(leafPool, &Value{id: i, op: sloInterior})
 	}
 
-	// --- RUNNING THE TEST SUITE ---
-	for _, tt := range tests {
-		fmt.Printf("==========================================\n")
-		fmt.Printf("TEST: %s\n", tt.name)
-		fmt.Printf("==========================================\n")
+	// 2. Build the Monster Tree
+	// Depth 14 = 16,383 Operations!
+	fmt.Println("==========================================")
+	fmt.Println("🔨 GENERATING MONSTER TREE (Depth 14)...")
+	startGen := time.Now()
+	idCounter := 1000 // Start IDs high to avoid colliding with registers
+	monsterTree := buildMassiveTree(3, leafPool, &idCounter)
+	fmt.Print(printAST(monsterTree, "", make(map[*Value]bool)))
+	fmt.Printf("Done. Generated %d nodes in %v\n", idCounter-1000, time.Since(startGen))
 
-		// 1. Identify all unique variables in this tree
-		varMap := make(map[int]bool)
-		extractRegIDs(tt.tree, varMap)
-		vars := make([]int, 0, len(varMap))
-		for id := range varMap {
-			vars = append(vars, id)
+	// 3. Run the Synthesis Engine (The Rewrite)
+	fmt.Println("\n🚀 COMPILING (Technology Mapping)...")
+	startCompile := time.Now()
+	optimizedTree := fullRewrite(monsterTree)
+	compileTime := time.Since(startCompile)
+	fmt.Printf("Done. Compilation took: %v\n", compileTime)
+	fmt.Print(printAST(optimizedTree, "", make(map[*Value]bool)))
+
+	// 4. Formal Verification Prep
+	varMap := make(map[int]bool)
+	extractRegIDs(monsterTree, varMap)
+	vars := make([]int, 0, len(varMap))
+	for id := range varMap {
+		vars = append(vars, id)
+	}
+	sort.Ints(vars)
+
+	fmt.Println("\n🔬 RUNNING FORMAL VERIFICATION...")
+	fmt.Printf("Variables: %d (Combinations: %d)\n", len(vars), 1<<len(vars))
+
+	startVerify := time.Now()
+	// Capture Before
+	originalLogic := captureTruthTable(monsterTree, vars)
+	// Capture After
+	optimizedLogic := captureTruthTable(optimizedTree, vars)
+	verifyTime := time.Since(startVerify)
+
+	// 5. Check Results
+	match := true
+	for i := range originalLogic {
+		if originalLogic[i] != optimizedLogic[i] {
+			match = false
+			break
 		}
-		sort.Ints(vars) // Sort for deterministic truth tables
+	}
 
-		// 2. Capture the exact boolean logic BEFORE optimization
-		originalLogic := captureTruthTable(tt.tree, vars)
+	fmt.Println("==========================================")
+	if match {
+		fmt.Printf("[✓] PERFORMANCE PASSED!\n")
+		fmt.Printf("    -> Compile Time: %v\n", compileTime)
+		fmt.Printf("    -> Verify Time : %v\n", verifyTime)
+	} else {
+		fmt.Printf("[X] LOGIC CORRUPTED DURING REWRITE!\n")
+	}
+	fmt.Println("==========================================")
+}
 
-		fmt.Println("=== BEFORE REWRITE ===")
-		fmt.Print(printAST(tt.tree, "", make(map[*Value]bool)))
+// buildMassiveTree recursively generates a massive, pseudo-random boolean AST
+func buildMassiveTree(depth int, leafPool []*Value, idCounter *int) *Value {
+	if depth == 0 {
+		// Pick a "random" register from our 16-register pool based on the ID counter
+		return leafPool[*idCounter%len(leafPool)]
+	}
 
-		// 3. Unleash the engine
-		optimizedTree := fullRewrite(tt.tree)
+	*idCounter++
+	currentID := *idCounter
 
-		fmt.Println("\n=== AFTER REWRITE ===")
-		fmt.Print(printAST(optimizedTree, "", make(map[*Value]bool)))
+	// Rotate operations to create a chaotic truth table
+	op := sloXor
+	if depth%3 == 1 {
+		op = sloAnd
+	} else if depth%3 == 2 {
+		op = sloOr
+	}
 
-		// 4. Capture the boolean logic AFTER optimization
-		optimizedLogic := captureTruthTable(optimizedTree, vars)
-
-		// 5. Verify Logic Preservation
-		match := true
-		for i := range originalLogic {
-			if originalLogic[i] != optimizedLogic[i] {
-				match = false
-				break
-			}
-		}
-
-		if match {
-			fmt.Printf("\n[✓] LOGIC VERIFIED: All %d combinations match perfectly.\n", len(originalLogic))
-		} else {
-			fmt.Printf("\n[X] LOGIC CORRUPTED: The rewrite changed the mathematical output!\n")
-		}
-		fmt.Println()
+	return &Value{
+		id: currentID,
+		op: op,
+		args: []*Value{
+			buildMassiveTree(depth-1, leafPool, idCounter),
+			buildMassiveTree(depth-1, leafPool, idCounter),
+		},
 	}
 }
 
